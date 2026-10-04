@@ -1,0 +1,95 @@
+name: atpro-manager-skip
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check out the same commit as the installed release
+        run: |
+          git checkout 5716a34e
+          git log -1 --oneline
+
+      - name: Patch atpro to skip aemu_manager
+        run: |
+          python3 - <<'PY'
+          p = "atpro/main.c"
+          s = open(p, "rb").read().decode("utf-8")
+          nl = "\r\n" if "\r\n" in s else "\n"
+
+          helper = nl.join([
+              "// aemu_manager patch: do not hook the aemu_manager homebrew itself",
+              "static int aemu_is_manager_path(const char *p)",
+              "{",
+              "\tstatic const char key[] = \"aemu_manager\";",
+              "\tif (p == NULL){",
+              "\t\treturn 0;",
+              "\t}",
+              "\tfor (;*p;p++){",
+              "\t\tint i = 0;",
+              "\t\twhile (key[i] && p[i]){",
+              "\t\t\tchar c = p[i];",
+              "\t\t\tif (c >= 'A' && c <= 'Z'){",
+              "\t\t\t\tc += 'a' - 'A';",
+              "\t\t\t}",
+              "\t\t\tif (c != key[i]){",
+              "\t\t\t\tbreak;",
+              "\t\t\t}",
+              "\t\t\ti++;",
+              "\t\t}",
+              "\t\tif (key[i] == '\\0'){",
+              "\t\t\treturn 1;",
+              "\t\t}",
+              "\t}",
+              "\treturn 0;",
+              "}",
+              "", ""])
+
+          marker = "// Module Start Event"
+          assert s.count(marker) == 1, "module_start marker not found exactly once"
+          s = s.replace(marker, helper + marker)
+
+          alive = 'printk("ATPRO - ALPHA VERSION %s %s\\n", __DATE__, __TIME__);'
+          assert s.count(alive) == 1, "alive printk not found exactly once"
+          call = nl.join([
+              alive,
+              "",
+              "\t// aemu_manager patch",
+              "\t{",
+              "\t\tconst char *init_file = (const char *)sceKernelInitFileName();",
+              "\t\tif (aemu_is_manager_path(init_file)){",
+              "\t\t\tprintk(\"%s: aemu_manager detected, not hooking\\n\", __func__);",
+              "\t\t\treturn 0;",
+              "\t\t}",
+              "\t}"])
+          s = s.replace(alive, call)
+          open(p, "wb").write(s.encode("utf-8"))
+          print("patched")
+          PY
+          git diff --stat
+
+      - name: Download PSP SDK
+        run: |
+          curl -sL https://github.com/pspdev/pspdev/releases/download/v20250601/pspdev-ubuntu-latest-x86_64.tar.gz | tar xz -C ./
+          echo "PSPDEV=${GITHUB_WORKSPACE}/pspdev" >> $GITHUB_ENV
+          echo "${GITHUB_WORKSPACE}/pspdev/bin" >> $GITHUB_PATH
+
+      - name: Build atpro (660, release)
+        run: |
+          cp procfw_sdk_prebuilt/include/* pspdev/psp/sdk/include/
+          cp procfw_sdk_prebuilt/lib/* pspdev/psp/sdk/lib/
+          mkdir -p dist/seplugins
+          cd atpro
+          make CONFIG_660=1 RELEASE=1
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: atpro_manager_skip
+          path: dist/seplugins/atpro.prx
+          if-no-files-found: error
